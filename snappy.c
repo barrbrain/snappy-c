@@ -356,7 +356,7 @@ static inline void incremental_copy(const char *src, char *op, int len)
 	DCHECK_GT(len, 0);
 	do {
 		*op++ = *src++;
-	} while (--len > 0);
+	} while (likely(--len > 0));
 }
 
 /*
@@ -397,7 +397,7 @@ static inline void incremental_copy(const char *src, char *op, int len)
 static inline void incremental_copy_fast_path(const char *src, char *op,
 					      int len)
 {
-	while (op - src < 8) {
+	while (unlikely(op - src < 8)) {
 		UNALIGNED_STORE64(op, UNALIGNED_LOAD64(src));
 		len -= op - src;
 		op += op - src;
@@ -418,7 +418,7 @@ static inline bool writer_append_from_self(struct writer *w, u32 offset,
 
 	if (op - w->base <= offset - 1u)	/* -1u catches offset==0 */
 		return false;
-	if (len <= 16 && offset >= 8 && space_left >= 16) {
+	if (likely(len <= 16 && offset >= 8 && space_left >= 16)) {
 		/* Fast path, used for the majority (70-80%) of dynamic
 		 * invocations. */
 		UNALIGNED_STORE64(op, UNALIGNED_LOAD64(op - offset));
@@ -454,7 +454,7 @@ static inline bool writer_try_fast_append(struct writer *w, const char *ip,
 {
 	char *op = w->op;
 	const int space_left = w->op_limit - op;
-	if (len <= 16 && available >= 16 && space_left >= 16) {
+	if (likely(len <= 16 && available >= 16 && space_left >= 16)) {
 		/* Fast path, used for the majority (~95%) of invocations */
 		UNALIGNED_STORE64(op, UNALIGNED_LOAD64(ip));
 		UNALIGNED_STORE64(op + 8, UNALIGNED_LOAD64(ip + 8));
@@ -1079,8 +1079,8 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 
 		if ((c & 0x3) == LITERAL) {
 			u32 literal_length = (c >> 2) + 1;
-			if (writer_try_fast_append(writer, ip, d->ip_limit - ip, 
-						   literal_length)) {
+			if (likely(writer_try_fast_append(writer, ip, d->ip_limit - ip, 
+							  literal_length))) {
 				DCHECK_LT(literal_length, 61);
 				ip += literal_length;
 				MAYBE_REFILL();
@@ -1095,7 +1095,7 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 			}
 
 			u32 avail = d->ip_limit - ip;
-			while (avail < literal_length) {
+			while (unlikely(avail < literal_length)) {
 				if (!writer_append(writer, ip, avail))
 					return;
 				literal_length -= avail;
@@ -1108,7 +1108,7 @@ static void decompress_all_tags(struct snappy_decompressor *d,
 					return;	/* Premature end of input */
 				d->ip_limit = ip + avail;
 			}
-			if (!writer_append(writer, ip, literal_length))
+			if (unlikely(!writer_append(writer, ip, literal_length)))
 				return;
 			ip += literal_length;
 			MAYBE_REFILL();
@@ -1164,7 +1164,7 @@ static bool refill_tag(struct snappy_decompressor *d)
 	/* Read more bytes from reader if needed */
 	u32 nbuf = d->ip_limit - ip;
 
-	if (nbuf < needed) {
+	if (unlikely(nbuf < needed)) {
 		/*
 		 * Stitch together bytes from ip and reader to form the word
 		 * contents.  We store the needed bytes in "scratch".  They
@@ -1187,7 +1187,7 @@ static bool refill_tag(struct snappy_decompressor *d)
 		DCHECK_EQ(nbuf, needed);
 		d->ip = d->scratch;
 		d->ip_limit = d->scratch + needed;
-	} else if (nbuf < 5) {
+	} else if (unlikely(nbuf < 5)) {
 		/*
 		 * Have enough bytes, but move into scratch so that we do not
 		 * read past end of input
@@ -1212,10 +1212,10 @@ static int internal_uncompress(struct source *r,
 
 	init_snappy_decompressor(&decompressor, r);
 
-	if (!read_uncompressed_length(&decompressor, &uncompressed_len))
+	if (unlikely(!read_uncompressed_length(&decompressor, &uncompressed_len)))
 		return -EIO;
 	/* Protect against possible DoS attack */
-	if ((u64) (uncompressed_len) > max_len)
+	if (unlikely((u64) (uncompressed_len) > max_len))
 		return -EIO;
 
 	writer_set_expected_length(writer, uncompressed_len);
@@ -1227,7 +1227,7 @@ static int internal_uncompress(struct source *r,
 	return (decompressor.eof && writer_check_length(writer)) ? 0 : -EIO;
 }
 
-static inline int compress(struct snappy_env *env, struct source *reader,
+static int compress(struct snappy_env *env, struct source *reader,
 			   struct sink *writer)
 {
 	int err;
