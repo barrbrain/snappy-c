@@ -36,21 +36,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifdef __KERNEL__
-#include <linux/kernel.h>
-#ifdef SG
-#include <linux/uio.h>
-#endif
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/snappy.h>
-#include <linux/vmalloc.h>
-#include <asm/unaligned.h>
-#else
 #include "snappy.h"
 #include "compat.h"
-#endif
 
 #define CRASH_UNLESS(x) BUG_ON(!(x))
 #define CHECK(cond) CRASH_UNLESS(cond)
@@ -202,84 +189,6 @@ static inline char *varint_encode32(char *sptr, u32 v)
 	return (char *)(ptr);
 }
 
-#ifdef SG
-
-struct source {
-	struct iovec *iov;
-	int iovlen;
-	int curvec;
-	int curoff;
-	size_t total;
-};
-
-/* Only valid at beginning when nothing is consumed */
-static inline int available(struct source *s)
-{
-	return s->total;
-}
-
-static inline const char *peek(struct source *s, size_t *len)
-{
-	if (likely(s->curvec < s->iovlen)) {
-		struct iovec *iv = &s->iov[s->curvec];
-		if (s->curoff < iv->iov_len) { 
-			*len = iv->iov_len - s->curoff;
-			return iv->iov_base + s->curoff;
-		}
-	}
-	*len = 0;
-	return NULL;
-}
-
-static inline void skip(struct source *s, size_t n)
-{
-	struct iovec *iv = &s->iov[s->curvec];
-	s->curoff += n;
-	DCHECK_LE(s->curoff, iv->iov_len);
-	if (s->curoff >= iv->iov_len && s->curvec + 1 < s->iovlen) {
-		s->curoff = 0;
-		s->curvec++;
-	}
-}
-
-struct sink {
-	struct iovec *iov;
-	int iovlen;
-	unsigned curvec;
-	unsigned curoff;
-	unsigned written;
-};
-
-static inline void append(struct sink *s, const char *data, size_t n)
-{
-	struct iovec *iov = &s->iov[s->curvec];
-	char *dst = iov->iov_base + s->curoff;
-	size_t nlen = min_t(size_t, iov->iov_len - s->curoff, n);
-	if (data != dst)
-		memcpy(dst, data, nlen);
-	s->written += n;
-	s->curoff += nlen;
-	while ((n -= nlen) > 0) {
-		data += nlen;
-		s->curvec++;
-		DCHECK_LT(s->curvec, s->iovlen);
-		iov++;
-		nlen = min_t(size_t, iov->iov_len, n);
-		memcpy(iov->iov_base, data, nlen);
-		s->curoff = nlen;
-	}
-}
-
-static inline void *sink_peek(struct sink *s, size_t n)
-{
-	struct iovec *iov = &s->iov[s->curvec];
-	if (s->curvec < iov->iov_len && iov->iov_len - s->curoff >= n)
-		return iov->iov_base + s->curoff;
-	return NULL;
-}
-
-#else
-
 struct source {
 	const char *ptr;
 	size_t left;
@@ -317,8 +226,6 @@ static inline void *sink_peek(struct sink *s, size_t n)
 {
 	return s->dest;
 }
-
-#endif
 
 struct writer {
 	char *base;
@@ -1308,107 +1215,6 @@ out:
 	return err;
 }
 
-#ifdef SG
-
-int snappy_compress_iov(struct snappy_env *env,
-			struct iovec *iov_in,
-			int iov_in_len,
-			size_t input_length,
-			struct iovec *iov_out,
-			int iov_out_len,
-			size_t *compressed_length)
-{
-	struct source reader = {
-		.iov = iov_in,
-		.iovlen = iov_in_len,
-		.total = input_length
-	};
-	struct sink writer = {
-		.iov = iov_out,
-		.iovlen = iov_out_len,
-	};
-	int err = compress(env, &reader, &writer);
-
-	/* Compute how many bytes were added */
-	*compressed_length = writer.written;
-	return err;
-}
-EXPORT_SYMBOL(snappy_compress_iov);
-
-/**
- * snappy_compress - Compress a buffer using the snappy compressor.
- * @env: Preallocated environment
- * @input: Input buffer
- * @input_length: Length of input_buffer
- * @compressed: Output buffer for compressed data
- * @compressed_length: The real length of the output written here.
- *
- * Return 0 on success, otherwise an negative error code.
- *
- * The output buffer must be at least
- * snappy_max_compressed_length(input_length) bytes long.
- *
- * Requires a preallocated environment from snappy_init_env.
- * The environment does not keep state over individual calls
- * of this function, just preallocates the memory.
- */
-int snappy_compress(struct snappy_env *env,
-		    const char *input,
-		    size_t input_length,
-		    char *compressed, size_t *compressed_length)
-{
-	struct iovec iov_in = {
-		.iov_base = (char *)input,
-		.iov_len = input_length,
-	};
-	struct iovec iov_out = {
-		.iov_base = compressed,
-		.iov_len = 0xffffffff,
-	};		
-	return snappy_compress_iov(env, 
-				   &iov_in, 1, input_length, 
-				   &iov_out, 1, compressed_length);
-}
-EXPORT_SYMBOL(snappy_compress);
-
-int snappy_uncompress_iov(struct iovec *iov_in, int iov_in_len,
-			   size_t input_len, char *uncompressed)
-{
-	struct source reader = {
-		.iov = iov_in,
-		.iovlen = iov_in_len,
-		.total = input_len
-	};
-	struct writer output = {
-		.base = uncompressed,
-		.op = uncompressed
-	};
-	return internal_uncompress(&reader, &output, 0xffffffff);
-}
-EXPORT_SYMBOL(snappy_uncompress_iov);
-
-/**
- * snappy_uncompress - Uncompress a snappy compressed buffer
- * @compressed: Input buffer with compressed data
- * @n: length of compressed buffer
- * @uncompressed: buffer for uncompressed data
- *
- * The uncompressed data buffer must be at least
- * snappy_uncompressed_length(compressed) bytes long.
- *
- * Return 0 on success, otherwise an negative error code.
- */
-int snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
-{
-	struct iovec iov = {
-		.iov_base = (char *)compressed,
-		.iov_len = n
-	};
-	return snappy_uncompress_iov(&iov, 1, n, uncompressed);
-}
-EXPORT_SYMBOL(snappy_uncompress);
-
-#else
 /**
  * snappy_compress - Compress a buffer using the snappy compressor.
  * @env: Preallocated environment
@@ -1470,40 +1276,6 @@ int snappy_uncompress(const char *compressed, size_t n, char *uncompressed)
 	return internal_uncompress(&reader, &output, 0xffffffff);
 }
 EXPORT_SYMBOL(snappy_uncompress);
-#endif
-
-#ifdef SG
-/**
- * snappy_init_env_sg - Allocate snappy compression environment
- * @env: Environment to preallocate
- * @sg: Input environment ever does scather gather
- *
- * If false is passed to sg then multiple entries in an iovec
- * are not legal.
- * Returns 0 on success, otherwise negative errno.
- * Must run in process context.
- */
-int snappy_init_env_sg(struct snappy_env *env, bool sg)
-{
-	env->hash_table = vmalloc(sizeof(u16) * kmax_hash_table_size);
-	if (!env->hash_table)
-		goto error;
-	if (sg) {
-		env->scratch = vmalloc(kblock_size);
-		if (!env->scratch)
-			goto error;
-		env->scratch_output =
-			vmalloc(snappy_max_compressed_length(kblock_size));
-		if (!env->scratch_output)
-			goto error;
-	}
-	return 0;
-error:
-	snappy_free_env(env);
-	return -ENOMEM;
-}
-EXPORT_SYMBOL(snappy_init_env_sg);
-#endif
 
 /**
  * snappy_init_env - Allocate snappy compression environment
@@ -1532,10 +1304,6 @@ EXPORT_SYMBOL(snappy_init_env);
 void snappy_free_env(struct snappy_env *env)
 {
 	vfree(env->hash_table);
-#ifdef SG
-	vfree(env->scratch);
-	vfree(env->scratch_output);
-#endif
 	memset(env, 0, sizeof(struct snappy_env));
 }
 EXPORT_SYMBOL(snappy_free_env);

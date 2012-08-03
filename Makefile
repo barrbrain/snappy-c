@@ -1,18 +1,17 @@
-CFLAGS := -Wall -g -O2 -DNDEBUG=1  -DSG=1
-# Remove -DSG=1 if you don't need scather-gather support
+CFLAGS := -Wall -g -O2 -DNDEBUG=1
 # NDEBUG=1 is recommended for production
 
 #CFLAGS += -m32
 #LDFLAGS += -m32
 
-all: scmd verify sgverify
+all: scmd verify
 
 snappy.o: snappy.c
 
 scmd: scmd.o snappy.o map.o util.o
 
 CLEAN := scmd.o snappy.o scmd bench bench.o fuzzer.o fuzzer map.o verify.o \
-	 verify util.o sgverify sgverify.o
+	 verify util.o
 
 clean: 
 	rm -f ${CLEAN}
@@ -47,7 +46,5 @@ bench: bench.o map.o snappy.o util.o ${OTHER} # ${SNAPREF}
 bench.o: CFLAGS += -I ../simple-pmu -D COMP # ${SNAPREF_FL}  # -D SIMPLE_PMU
 
 verify: verify.o map.o snappy.o util.o
-
-sgverify: sgverify.o map.o snappy.o util.o
 
 
