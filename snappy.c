@@ -850,9 +850,32 @@ static char *compress_fragment(const char *const input,
 				DCHECK_GE(candidate, baseip);
 				DCHECK_LT(candidate, ip);
 
+				/* Hash chain */
+				table[hash_bytes(ip - baseip, shift)] = table[hval];
+
 				table[hval] = ip - baseip;
 			} while (likely(UNALIGNED_LOAD32(ip) !=
 					UNALIGNED_LOAD32(candidate)));
+
+			/* Search hash chain for longest match */
+			{
+				u32 offset = candidate - baseip;
+				u32 match_length = ip - candidate < 8 ? 0 : 4 + find_match_length(candidate + 4, ip + 4, ip_end);
+				u32 previous, prev_length;
+				while (offset > (previous = table[hash_bytes(offset, shift)])) {
+					offset = previous;
+					if (baseip[offset + match_length] != ip[match_length])
+						continue;
+					prev_length = find_match_length(baseip + offset, ip, ip_end);
+					/* Penalise candidates that use a longer copy instruction */
+					if (prev_length && (prev_length > 11 || (ip - baseip) - offset > 2047))
+						prev_length--;
+					if (prev_length <= match_length)
+						continue;
+					candidate = baseip + offset;
+					match_length = prev_length;
+				}
+			}
 
 /*
  * Step 2: A 4-byte match has been found.  We'll later see if more
@@ -907,6 +930,10 @@ static char *compress_fragment(const char *const input,
 					       (input_bytes, 1), shift);
 				candidate = baseip + table[cur_hash];
 				candidate_bytes = UNALIGNED_LOAD32(candidate);
+
+				/* Hash chain */
+				table[hash_bytes(ip - baseip, shift)] = table[cur_hash];
+
 				table[cur_hash] = ip - baseip;
 			} while (get_u32_at_offset(input_bytes, 1) ==
 				 candidate_bytes);
